@@ -1,0 +1,18 @@
+[package]
+name = "mailchimp-to-gdrive"
+version = "0.1.0"
+authors = ["Teddy Heinen <teddy@heinen.dev>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+warp = "0.2.5"
+tokio = { version = "0.2", features = ["macros"] }
+env_logger = "0.7.1"
+log = "0.4.11"
+serde = { version = "1.0", features = ["derive"] }
+yup-oauth2 = "4.1.2"
+reqwest = { version = "0.10.8", features = ["json"] }
+serde_json = "1.0"
+uuid = { version = "0.8", features = ["serde", "v4"] }
