@@ -1,25 +1,45 @@
 #[macro_use]
 extern crate log;
 
-#[macro_use]
-extern crate serde_json;
-
+mod options;
 mod structures;
 
-use log::Level;
-use serde_json::Value;
-use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use warp::{http::Response, Filter, Rejection};
-use yup_oauth2::authenticator::Authenticator;
-use yup_oauth2::{
-    AccessToken, InstalledFlowAuthenticator, InstalledFlowReturnMethod, ServiceAccountAuthenticator,
-};
+use warp::{Filter, Rejection, Reply};
+use yup_oauth2::{AccessToken, ServiceAccountAuthenticator};
 
-use std::error::Error;
+use once_cell::sync::OnceCell;
+use options::*;
+use std::convert::Infallible;
+use structopt::StructOpt;
 use structures::*;
+use warp::http::StatusCode;
 
-static DRIVE_ID: &str = "0ADjTANDsCZhEUk9PVA";
+static ARGUMENTS: OnceCell<Arguments> = OnceCell::new();
+
+async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> {
+    let code;
+    let message;
+
+    if err.is_not_found() {
+        code = StatusCode::NOT_FOUND;
+        message = "NOT_FOUND";
+    } else if let Some(e) = err.find::<StringRejection>() {
+        code = StatusCode::BAD_REQUEST;
+        message = &e.message;
+    } else {
+        eprintln!("unhandled rejection: {:?}", err);
+        code = StatusCode::INTERNAL_SERVER_ERROR;
+        message = "UNHANDLED_REJECTION";
+    }
+
+    let json = warp::reply::json(&ErrorMessage {
+        code: code.as_u16(),
+        message: message.into(),
+    });
+
+    Ok(warp::reply::with_status(json, code))
+}
 
 async fn get_token() -> Result<AccessToken, Box<dyn std::error::Error>> {
     //TODO make this caching based on ttl
@@ -35,7 +55,7 @@ async fn get_token() -> Result<AccessToken, Box<dyn std::error::Error>> {
 async fn subscribe(email: String, token: AccessToken) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!(
         "https://www.googleapis.com/drive/v3/files/{}/permissions",
-        DRIVE_ID
+        ARGUMENTS.get().expect("Arguments to be defined").drive_id,
     );
     let client = reqwest::Client::new();
 
@@ -83,7 +103,8 @@ async fn unsubscribe(email: String, token: AccessToken) -> Result<(), Box<dyn st
 
     let url = format!(
         "https://www.googleapis.com/drive/v3/files/{}/permissions/{}",
-        DRIVE_ID, permission_id
+        ARGUMENTS.get().expect("Arguments to be defined").drive_id,
+        permission_id
     );
     let client = reqwest::Client::new();
 
@@ -107,19 +128,21 @@ async fn handle_mailchimp_hook(body: HookBody) -> Result<impl warp::Reply, warp:
             info!("Adding permission for {}", body.email);
             match subscribe(body.email.clone(), token).await {
                 Ok(_) => Ok(warp::reply()),
-                Err(_) => Err(warp::reject()),
+                Err(e) => Err(warp::reject::custom(StringRejection::new(&e.to_string()))),
             }
         }
         HookAction::Unsubscribe => {
             info!("Removing permission for {}", body.email);
             match unsubscribe(body.email.clone(), token).await {
                 Ok(_) => Ok(warp::reply()),
-                Err(_) => Err(warp::reject()),
+                Err(e) => Err(warp::reject::custom(StringRejection::new(&e.to_string()))),
             }
         }
         HookAction::Other => {
             info!("Received hook with unsupported action type, this likely means that the webhook is configured to send more events than this program needs.  \n {:?}", body);
-            Err(warp::reject())
+            Err(warp::reject::custom(StringRejection::new(
+                "Unsupported action type",
+            )))
         }
     }
 }
@@ -128,9 +151,19 @@ async fn handle_mailchimp_hook(body: HookBody) -> Result<impl warp::Reply, warp:
 async fn main() {
     env_logger::init();
 
+    ARGUMENTS
+        .set(Arguments::from_args())
+        .expect("Arguments to parse");
+
     let webhook = warp::post()
         .and(warp::path("mailchimp"))
         .and(warp::body::json())
-        .and_then(handle_mailchimp_hook);
-    warp::serve(webhook).run(([127, 0, 0, 1], 3030)).await;
+        .and_then(handle_mailchimp_hook)
+        .recover(handle_rejection);
+    warp::serve(webhook)
+        .run((
+            [127, 0, 0, 1],
+            ARGUMENTS.get().expect("Arguments to be defined").port,
+        ))
+        .await;
 }

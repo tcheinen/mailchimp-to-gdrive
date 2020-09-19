@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt::{Debug, Formatter};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum HookAction {
@@ -21,4 +22,31 @@ pub struct HookBody {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GetIdForEmailResponse {
     pub id: String,
+}
+
+pub struct StringRejection {
+    pub message: String,
+}
+
+impl StringRejection {
+    pub fn new(message: &str) -> Self {
+        StringRejection {
+            message: message.to_string(),
+        }
+    }
+}
+
+impl Debug for StringRejection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)?;
+        Ok(())
+    }
+}
+
+impl warp::reject::Reject for StringRejection {}
+
+#[derive(Serialize)]
+pub struct ErrorMessage {
+    pub code: u16,
+    pub message: String,
 }
