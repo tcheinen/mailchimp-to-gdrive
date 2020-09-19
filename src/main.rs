@@ -48,7 +48,7 @@ async fn get_token() -> Result<AccessToken, Box<dyn std::error::Error>> {
     let auth = ServiceAccountAuthenticator::builder(secret).build().await?;
 
     Ok(auth
-        .token(&vec!["https://www.googleapis.com/auth/drive"])
+        .token(&["https://www.googleapis.com/auth/drive"])
         .await?)
 }
 
@@ -70,7 +70,7 @@ async fn subscribe(email: String, token: AccessToken) -> Result<(), Box<dyn std:
                 ("emailAddress".to_string(), email),
             ]
             .iter()
-            .map(|x| x.clone())
+            .cloned()
             .collect::<HashMap<String, String>>(),
         )
         .send()
