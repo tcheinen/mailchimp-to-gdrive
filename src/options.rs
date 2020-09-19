@@ -1,7 +1,7 @@
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
-#[structopt(about = "Server to manage google drive file permissions based on mailchimp list")]
+#[structopt(about, author)]
 pub struct Arguments {
     #[structopt(short, long, name = "drive-id", index = 1)]
     pub drive_id: String,
