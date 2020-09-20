@@ -1,12 +1,14 @@
 #[macro_use]
 extern crate log;
 
+mod drive;
+mod error;
 mod options;
 mod structures;
 
 use std::collections::HashMap;
 use warp::{Filter, Rejection, Reply};
-use yup_oauth2::{AccessToken, ServiceAccountAuthenticator};
+use yup_oauth2::{AccessToken, ServiceAccountAuthenticator, ServiceAccountKey};
 
 use once_cell::sync::OnceCell;
 use options::*;
@@ -15,7 +17,10 @@ use structopt::StructOpt;
 use structures::*;
 use warp::http::StatusCode;
 
+use drive::get_token;
+
 static ARGUMENTS: OnceCell<Arguments> = OnceCell::new();
+static SERVICE_ACCOUNT_KEY: OnceCell<ServiceAccountKey> = OnceCell::new();
 
 async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> {
     let code;
@@ -41,99 +46,18 @@ async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> {
     Ok(warp::reply::with_status(json, code))
 }
 
-async fn get_token() -> Result<AccessToken, Box<dyn std::error::Error>> {
-    //TODO make this caching based on ttl
-    let secret = yup_oauth2::read_service_account_key("clientsecret.json").await?;
-
-    let auth = ServiceAccountAuthenticator::builder(secret).build().await?;
-
-    Ok(auth
-        .token(&["https://www.googleapis.com/auth/drive"])
-        .await?)
-}
-
-async fn subscribe(email: String, token: AccessToken) -> Result<(), Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://www.googleapis.com/drive/v3/files/{}/permissions",
-        ARGUMENTS.get().expect("Arguments to be defined").drive_id,
-    );
-    let client = reqwest::Client::new();
-
-    client
-        .post(&url)
-        .bearer_auth(token.as_str())
-        .query(&[("supportsAllDrives", "true"), ("alt", "json")])
-        .json(
-            &[
-                ("role".to_string(), "reader".to_string()),
-                ("type".to_string(), "user".to_string()),
-                ("emailAddress".to_string(), email),
-            ]
-            .iter()
-            .cloned()
-            .collect::<HashMap<String, String>>(),
-        )
-        .send()
-        .await?
-        .error_for_status()
-        .map(|_| ())?;
-
-    Ok(())
-}
-
-async fn unsubscribe(email: String, token: AccessToken) -> Result<(), Box<dyn std::error::Error>> {
-    let permission_id: String = {
-        // API v3 has no method to translate emails to permission ids??
-        let url = format!(
-            "https://www.googleapis.com/drive/v2/permissionIds/{}",
-            email
-        );
-        let client = reqwest::Client::new();
-        serde_json::from_str::<GetIdForEmailResponse>(
-            &client
-                .get(&url)
-                .bearer_auth(token.as_str())
-                .send()
-                .await?
-                .text()
-                .await?,
-        )?
-        .id
-    };
-
-    let url = format!(
-        "https://www.googleapis.com/drive/v3/files/{}/permissions/{}",
-        ARGUMENTS.get().expect("Arguments to be defined").drive_id,
-        permission_id
-    );
-    let client = reqwest::Client::new();
-
-    client
-        .delete(&url)
-        .bearer_auth(token.as_str())
-        .query(&[("supportsAllDrives", "true")])
-        .send()
-        .await?
-        .error_for_status()
-        .map(|_| ())?;
-
-    Ok(())
-}
-
 async fn handle_mailchimp_hook(body: HookBody) -> Result<impl warp::Reply, warp::Rejection> {
-    let token = get_token().await.unwrap();
-
     match body.action {
         HookAction::Subscribe => {
             info!("Adding permission for {}", body.email);
-            match subscribe(body.email.clone(), token).await {
+            match drive::add_user(body.email.clone()).await {
                 Ok(_) => Ok(warp::reply()),
                 Err(e) => Err(warp::reject::custom(StringRejection::new(&e.to_string()))),
             }
         }
         HookAction::Unsubscribe => {
             info!("Removing permission for {}", body.email);
-            match unsubscribe(body.email.clone(), token).await {
+            match drive::remove_user(body.email.clone()).await {
                 Ok(_) => Ok(warp::reply()),
                 Err(e) => Err(warp::reject::custom(StringRejection::new(&e.to_string()))),
             }
@@ -150,10 +74,33 @@ async fn handle_mailchimp_hook(body: HookBody) -> Result<impl warp::Reply, warp:
 #[tokio::main]
 async fn main() {
     env_logger::init();
+    SERVICE_ACCOUNT_KEY.set(
+        yup_oauth2::read_service_account_key("clientsecret.json")
+            .await
+            .expect("clientsecret.json to exist"),
+    );
+
+    info!(
+        "Starting up with bot account {}",
+        SERVICE_ACCOUNT_KEY
+            .get()
+            .expect("SERVICE_ACCOUNT_KEY to be defined")
+            .client_email
+            .as_str()
+    );
 
     ARGUMENTS
         .set(Arguments::from_args())
         .expect("Arguments to parse");
+
+    info!(
+        "Changing permissions for the following IDs: {:?}",
+        ARGUMENTS
+            .get()
+            .expect("Arguments to be defined")
+            .drive_id
+            .as_slice()
+    );
 
     let webhook = warp::post()
         .and(warp::path("mailchimp"))
